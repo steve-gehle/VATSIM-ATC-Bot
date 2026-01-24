@@ -1,12 +1,16 @@
 import discord
 import datetime
 
-def create_controller_embed(controller_data: dict) -> discord.Embed:
+def create_controller_embed(controller_data: dict, nickname: str = None) -> discord.Embed:
     """Creates a standardized embed for online VATSIM controller data."""
     logon_time = datetime.datetime.fromisoformat(controller_data['logon_time'].replace('Z', '+00:00'))
     
+    title = f"📡 Controller Online: {controller_data['callsign']}"
+    if nickname:
+        title = f"📡 {nickname}: {controller_data['callsign']}"
+        
     embed = discord.Embed(
-        title=f"📡 Controller Online: {controller_data['callsign']}",
+        title=title,
         description=f"**{controller_data['name']}** (`{controller_data['cid']}`)",
         color=discord.Color.blue(),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
@@ -21,13 +25,17 @@ def create_controller_embed(controller_data: dict) -> discord.Embed:
     embed.set_footer(text="Last Updated")
     return embed
 
-def create_pilot_embed(pilot_data: dict) -> discord.Embed:
+def create_pilot_embed(pilot_data: dict, nickname: str = None) -> discord.Embed:
     """Creates a standardized embed for online VATSIM pilot data."""
     flight_plan = pilot_data.get('flight_plan')
     logon_time = datetime.datetime.fromisoformat(pilot_data['logon_time'].replace('Z', '+00:00'))
 
+    title = f"✈️ Live Flight: {pilot_data['callsign']}"
+    if nickname:
+        title = f"✈️ {nickname}: {pilot_data['callsign']}"
+        
     embed = discord.Embed(
-        title=f"✈️ Live Flight: {pilot_data['callsign']}",
+        title=title,
         description=f"**{pilot_data['name']}** (`{pilot_data['cid']}`)",
         color=discord.Color.green(),
         timestamp=datetime.datetime.now(datetime.timezone.utc)

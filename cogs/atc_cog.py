@@ -458,10 +458,11 @@ class AtcCog(commands.Cog):
         cid="The VATSIM CID of the controller to track.", 
         channel="The channel to post the tracking embed in.",
         role="The role to ping when the controller comes online (Optional).",
-        delete_on_offline="Set to True to delete the message when the controller logs off."
+        delete_on_offline="Set to True to delete the message when the controller logs off.",
+        nickname="A friendly name for this controller (Optional)."
     )
     @app_commands.check(check_manager_permissions)
-    async def track_controller(self, interaction: discord.Interaction, cid: str, channel: discord.TextChannel, delete_on_offline: bool = False, role: Optional[discord.Role] = None):
+    async def track_controller(self, interaction: discord.Interaction, cid: str, channel: discord.TextChannel, delete_on_offline: bool = False, role: Optional[discord.Role] = None, nickname: Optional[str] = None):
         await interaction.response.defer(ephemeral=True)
 
         existing = await self.db_manager.get_controller_tracker_by_cid(interaction.guild_id, cid)
@@ -469,7 +470,11 @@ class AtcCog(commands.Cog):
             await interaction.followup.send(f"A controller tracker for CID `{cid}` already exists.", ephemeral=True)
             return
 
-        embed = discord.Embed(title=f"Initializing Controller Tracker for CID: {cid}", description="Fetching initial data...", color=discord.Color.light_grey())
+        title = f"Initializing Controller Tracker for CID: {cid}"
+        if nickname:
+            title = f"Initializing Controller Tracker: {nickname} (CID: {cid})"
+            
+        embed = discord.Embed(title=title, description="Fetching initial data...", color=discord.Color.light_grey())
         try:
             message = await channel.send(embed=embed)
         except discord.Forbidden:
@@ -477,9 +482,11 @@ class AtcCog(commands.Cog):
             return
         
         role_id = role.id if role else None
-        await self.db_manager.add_controller_tracker(interaction.guild_id, channel.id, message.id, cid, delete_on_offline, role_id)
+        await self.db_manager.add_controller_tracker(interaction.guild_id, channel.id, message.id, cid, delete_on_offline, role_id, nickname)
         
         response_text = f"✅ Controller tracker for CID `{cid}` created in {channel.mention}."
+        if nickname:
+            response_text = f"✅ Controller tracker for **{nickname}** (CID `{cid}`) created in {channel.mention}."
         if role:
             response_text += f"\n*I will ping {role.mention} when the controller comes online.*"
         if delete_on_offline:
@@ -513,6 +520,80 @@ class AtcCog(commands.Cog):
 
         await self.db_manager.remove_controller_tracker(tracker_id)
         await interaction.followup.send(f"✅ The controller tracker for CID `{cid}` has been removed.", ephemeral=True)
+
+    @app_commands.command(name="edit-controller-tracker", description="Edit settings for an existing controller tracker.")
+    @app_commands.describe(
+        cid="The VATSIM CID of the controller tracker to edit.",
+        channel="Change the channel (Optional).",
+        role="Change the role to ping (Optional).",
+        delete_on_offline="Change delete-on-offline behavior (Optional).",
+        nickname="Change the nickname (Optional)."
+    )
+    @app_commands.check(check_manager_permissions)
+    async def edit_controller_tracker(self, interaction: discord.Interaction, cid: str,
+                                      channel: Optional[discord.TextChannel] = None,
+                                      role: Optional[discord.Role] = None,
+                                      delete_on_offline: Optional[bool] = None,
+                                      nickname: Optional[str] = None):
+        await interaction.response.defer(ephemeral=True)
+
+        # Strip 'CID: ' prefix if present (handles legacy data or user typos)
+        cid = cid.replace('CID:', '').replace('CID ', '').strip()
+
+        tracker = await self.db_manager.get_controller_tracker_by_cid(interaction.guild_id, cid)
+        if not tracker:
+            await interaction.followup.send(f"No controller tracker found for CID `{cid}`.", ephemeral=True)
+            return
+
+        tracker_id = tracker[0]
+
+        # Build update parameters
+        updates = []
+        if channel is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, channel_id=channel.id)
+            updates.append(f"Channel: {channel.mention}")
+        if role is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, role_id=role.id)
+            updates.append(f"Role: {role.mention}")
+        if delete_on_offline is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, delete_on_offline=delete_on_offline)
+            updates.append(f"Delete on offline: {delete_on_offline}")
+        if nickname is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, nickname=nickname)
+            updates.append(f"Nickname: {nickname}")
+
+        if not updates:
+            await interaction.followup.send("No changes specified. Please provide at least one parameter to update.", ephemeral=True)
+            return
+
+        updates_text = "\n• ".join(updates)
+        await interaction.followup.send(f"✅ Updated controller tracker for CID `{cid}`:\n• {updates_text}", ephemeral=True)
+
+    @edit_controller_tracker.autocomplete('cid')
+    async def edit_controller_tracker_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        trackers = await self.db_manager.get_all_controller_trackers()
+        guild_trackers = [t for t in trackers if t[1] == interaction.guild_id]
+
+        choices = []
+        for tracker in guild_trackers:
+            # Handle both old and new format
+            if len(tracker) == 9:
+                cid = tracker[4]
+                nickname = tracker[8]
+            else:
+                cid = tracker[4]
+                nickname = None
+            
+            name = f"CID: {cid}"
+            if nickname:
+                name = f"{nickname} (CID: {cid})"
+            
+            choices.append(app_commands.Choice(name=name, value=str(cid)))
+
+        if current:
+            return [choice for choice in choices if current.lower() in choice.name.lower() or current.lower() in choice.value.lower()]
+        
+        return choices[:25]
 
     @untrack_controller.autocomplete('cid')
     async def untrack_controller_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
@@ -548,7 +629,12 @@ class AtcCog(commands.Cog):
         
         description = ""
         for tracker in guild_trackers:
-            tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker
+            # Handle both old (8 columns) and new (9 columns) format
+            if len(tracker) == 9:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent, nickname = tracker
+            else:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker
+                nickname = None
             
             channel = self.bot.get_channel(channel_id)
             channel_text = channel.mention if channel else f"Unknown Channel (ID: {channel_id})"
@@ -558,7 +644,11 @@ class AtcCog(commands.Cog):
             
             delete_text = " 🗑️" if delete_on_offline else ""
             
-            description += f"• **CID `{cid}`** → {channel_text}{role_text}{delete_text}\n"
+            label = f"**CID `{cid}`**"
+            if nickname:
+                label = f"**{nickname}** (CID `{cid}`)"
+            
+            description += f"• {label} → {channel_text}{role_text}{delete_text}\n"
         
         embed.description = description
         embed.set_footer(text="🗑️ = Message deleted when offline")
@@ -594,7 +684,12 @@ class AtcCog(commands.Cog):
         controllers_by_cid = {str(c['cid']): c for c in vatsim_data.get('controllers', [])}
 
         for tracker_data in all_trackers:
-            tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker_data
+            # Handle both old (8 columns) and new (9 columns) format for backward compatibility
+            if len(tracker_data) == 9:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent, nickname = tracker_data
+            else:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker_data
+                nickname = None
             
             channel = self.bot.get_channel(channel_id)
             if not channel:
@@ -604,7 +699,7 @@ class AtcCog(commands.Cog):
             controller_data = controllers_by_cid.get(cid)
 
             if controller_data: # Controller is ONLINE
-                embed = create_controller_embed(controller_data)
+                embed = create_controller_embed(controller_data, nickname)
                 content_to_send = None
 
                 if role_id and not ping_sent:
@@ -683,14 +778,24 @@ class AtcCog(commands.Cog):
         if not channel: return
         try:
             message = await channel.fetch_message(message_id)
+            # Get nickname from guild
+            tracker = await self.db_manager.get_controller_tracker_by_cid(message.guild.id, cid)
+            nickname = tracker[8] if tracker and len(tracker) > 8 else None
+            
             if controller_data:
-                embed = create_controller_embed(controller_data)
+                embed = create_controller_embed(controller_data, nickname)
                 # We don't handle pings here since this is a manual, one-off update
                 await message.edit(content=None, embed=embed)
             else:
+                title = "📡 Controller Offline"
+                description = f"The controller with CID `{cid}` is not currently connected to VATSIM."
+                if nickname:
+                    title = f"📡 {nickname} Offline"
+                    description = f"**{nickname}** (CID `{cid}`) is not currently connected to VATSIM."
+                    
                 embed = discord.Embed(
-                    title="📡 Controller Offline",
-                    description=f"The controller with CID `{cid}` is not currently connected to VATSIM.",
+                    title=title,
+                    description=description,
                     color=discord.Color.red(),
                     timestamp=datetime.datetime.now(datetime.timezone.utc)
                 )

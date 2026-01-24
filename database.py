@@ -1,8 +1,9 @@
 import aiosqlite
 import discord
 from typing import Optional
+import os
 
-DB_FILE = "vatsim_bot.db"
+DB_FILE = os.getenv("DB_PATH", "/data/vatsim_bot.db")
 
 class DatabaseManager:
     """Manages the bot's SQLite database."""
@@ -34,9 +35,17 @@ class DatabaseManager:
                     vatsim_cid TEXT NOT NULL,
                     delete_on_offline BOOLEAN DEFAULT FALSE NOT NULL,
                     role_id INTEGER,
-                    ping_sent BOOLEAN NOT NULL DEFAULT 0
+                    ping_sent BOOLEAN NOT NULL DEFAULT 0,
+                    nickname TEXT
                 )
             """)
+            
+            # Migration: Add nickname column if it doesn't exist
+            try:
+                await db.execute("ALTER TABLE flight_trackers ADD COLUMN nickname TEXT")
+                await db.commit()
+            except:
+                pass  # Column already exists
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS controller_trackers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,9 +55,17 @@ class DatabaseManager:
                     vatsim_cid TEXT NOT NULL,
                     delete_on_offline BOOLEAN DEFAULT FALSE NOT NULL,
                     role_id INTEGER,
-                    ping_sent BOOLEAN NOT NULL DEFAULT 0
+                    ping_sent BOOLEAN NOT NULL DEFAULT 0,
+                    nickname TEXT
                 )
             """)
+            
+            # Migration: Add nickname column if it doesn't exist
+            try:
+                await db.execute("ALTER TABLE controller_trackers ADD COLUMN nickname TEXT")
+                await db.commit()
+            except:
+                pass  # Column already exists
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS active_notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,22 +168,22 @@ class DatabaseManager:
                 return result[0] if result else 0
 
     # --- Flight Tracker Methods ---
-    async def add_flight_tracker(self, guild_id: int, channel_id: int, message_id: int, vatsim_cid: str, delete_on_offline: bool, role_id: Optional[int]):
+    async def add_flight_tracker(self, guild_id: int, channel_id: int, message_id: int, vatsim_cid: str, delete_on_offline: bool, role_id: Optional[int], nickname: Optional[str] = None):
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute(
-                "INSERT INTO flight_trackers (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id)
+                "INSERT INTO flight_trackers (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, nickname) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, nickname)
             )
             await db.commit()
 
     async def get_all_flight_trackers(self) -> list:
         async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent FROM flight_trackers") as cursor:
+            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent, nickname FROM flight_trackers") as cursor:
                 return await cursor.fetchall()
 
     async def get_flight_tracker_by_cid(self, guild_id: int, vatsim_cid: str) -> tuple | None:
         async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent FROM flight_trackers WHERE guild_id = ? AND vatsim_cid = ?", (guild_id, vatsim_cid)) as cursor:
+            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent, nickname FROM flight_trackers WHERE guild_id = ? AND vatsim_cid = ?", (guild_id, vatsim_cid)) as cursor:
                 return await cursor.fetchone()
 
     async def remove_flight_tracker(self, tracker_id: int):
@@ -193,22 +210,22 @@ class DatabaseManager:
             await db.commit()
 
     # --- Controller Tracker Methods ---
-    async def add_controller_tracker(self, guild_id: int, channel_id: int, message_id: int, vatsim_cid: str, delete_on_offline: bool, role_id: Optional[int]):
+    async def add_controller_tracker(self, guild_id: int, channel_id: int, message_id: int, vatsim_cid: str, delete_on_offline: bool, role_id: Optional[int], nickname: Optional[str] = None):
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute(
-                "INSERT INTO controller_trackers (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id)
+                "INSERT INTO controller_trackers (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, nickname) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, nickname)
             )
             await db.commit()
 
     async def get_all_controller_trackers(self) -> list:
         async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent FROM controller_trackers") as cursor:
+            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent, nickname FROM controller_trackers") as cursor:
                 return await cursor.fetchall()
 
     async def get_controller_tracker_by_cid(self, guild_id: int, vatsim_cid: str) -> tuple | None:
         async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent FROM controller_trackers WHERE guild_id = ? AND vatsim_cid = ?", (guild_id, vatsim_cid)) as cursor:
+            async with db.execute("SELECT id, guild_id, channel_id, message_id, vatsim_cid, delete_on_offline, role_id, ping_sent, nickname FROM controller_trackers WHERE guild_id = ? AND vatsim_cid = ?", (guild_id, vatsim_cid)) as cursor:
                 return await cursor.fetchone()
 
     async def remove_controller_tracker(self, tracker_id: int):
@@ -233,3 +250,83 @@ class DatabaseManager:
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute("UPDATE controller_trackers SET ping_sent = ? WHERE id = ?", (status, tracker_id))
             await db.commit()
+
+    # --- Edit Tracker Methods ---
+    async def update_flight_tracker(self, tracker_id: int, channel_id: Optional[int] = None, 
+                                   role_id: Optional[int] = None, delete_on_offline: Optional[bool] = None,
+                                   nickname: Optional[str] = None):
+        """Updates specified fields of a flight tracker."""
+        updates = []
+        params = []
+        
+        if channel_id is not None:
+            updates.append("channel_id = ?")
+            params.append(channel_id)
+        if role_id is not None:
+            updates.append("role_id = ?")
+            params.append(role_id)
+        if delete_on_offline is not None:
+            updates.append("delete_on_offline = ?")
+            params.append(delete_on_offline)
+        if nickname is not None:
+            updates.append("nickname = ?")
+            params.append(nickname)
+        
+        if not updates:
+            return
+        
+        params.append(tracker_id)
+        query = f"UPDATE flight_trackers SET {', '.join(updates)} WHERE id = ?"
+        
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute(query, params)
+            await db.commit()
+
+    async def update_controller_tracker(self, tracker_id: int, channel_id: Optional[int] = None,
+                                        role_id: Optional[int] = None, delete_on_offline: Optional[bool] = None,
+                                        nickname: Optional[str] = None):
+        """Updates specified fields of a controller tracker."""
+        updates = []
+        params = []
+        
+        if channel_id is not None:
+            updates.append("channel_id = ?")
+            params.append(channel_id)
+        if role_id is not None:
+            updates.append("role_id = ?")
+            params.append(role_id)
+        if delete_on_offline is not None:
+            updates.append("delete_on_offline = ?")
+            params.append(delete_on_offline)
+        if nickname is not None:
+            updates.append("nickname = ?")
+            params.append(nickname)
+        
+        if not updates:
+            return
+        
+        params.append(tracker_id)
+        query = f"UPDATE controller_trackers SET {', '.join(updates)} WHERE id = ?"
+        
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute(query, params)
+            await db.commit()
+
+    async def get_flight_tracker_by_cid(self, guild_id: int, vatsim_cid: str):
+        """Gets a flight tracker by CID and guild."""
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute(
+                "SELECT id, channel_id, role_id, delete_on_offline, nickname FROM flight_trackers WHERE guild_id = ? AND vatsim_cid = ?",
+                (guild_id, vatsim_cid)
+            ) as cursor:
+                return await cursor.fetchone()
+
+    async def get_controller_tracker_by_cid(self, guild_id: int, vatsim_cid: str):
+        """Gets a controller tracker by CID and guild."""
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute(
+                "SELECT id, channel_id, role_id, delete_on_offline, nickname FROM controller_trackers WHERE guild_id = ? AND vatsim_cid = ?",
+                (guild_id, vatsim_cid)
+            ) as cursor:
+                return await cursor.fetchone()
+
