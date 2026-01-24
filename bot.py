@@ -23,6 +23,7 @@ class MyBot(commands.AutoShardedBot):
         await self.load_extension("cogs.airport_cog")
         await self.load_extension("cogs.flight_tracker_cog")        
 
+        # Global sync
         await self.tree.sync()
 
 

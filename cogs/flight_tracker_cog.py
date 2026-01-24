@@ -235,6 +235,40 @@ class FlightTrackerCog(commands.Cog):
         
         return choices[:25]
 
+    @app_commands.command(name="list-pilot-trackers", description="Lists all active pilot trackers for this server.")
+    async def list_pilot_trackers(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        all_trackers = await self.db_manager.get_all_flight_trackers()
+        guild_trackers = [t for t in all_trackers if t[1] == interaction.guild_id]
+        
+        if not guild_trackers:
+            await interaction.followup.send("There are no active pilot trackers for this server.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title=f"Active Pilot Trackers for {interaction.guild.name}",
+            color=discord.Color.og_blurple()
+        )
+        
+        description = ""
+        for tracker in guild_trackers:
+            tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker
+            
+            channel = self.bot.get_channel(channel_id)
+            channel_text = channel.mention if channel else f"Unknown Channel (ID: {channel_id})"
+            
+            role = interaction.guild.get_role(role_id) if role_id else None
+            role_text = f", pings {role.mention}" if role else ""
+            
+            delete_text = " 🗑️" if delete_on_offline else ""
+            
+            description += f"• **CID `{cid}`** → {channel_text}{role_text}{delete_text}\n"
+        
+        embed.description = description
+        embed.set_footer(text="🗑️ = Message deleted when offline")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(FlightTrackerCog(bot))
