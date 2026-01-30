@@ -432,26 +432,6 @@ class AtcCog(commands.Cog):
         print(f"[{timestamp}] ✅ Manual update completed")
         
         await interaction.followup.send("✅ All updates completed! Check the console for detailed logs.", ephemeral=True)
-    
-    @app_commands.command(name="restart-bot", description="Restart the bot (Admin only).")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def restart_bot(self, interaction: discord.Interaction):
-        await interaction.response.send_message("🔄 Restarting in 3 seconds...", ephemeral=True)
-        
-        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
-        print(f"[{timestamp}] 🔄 RESTART TRIGGERED by {interaction.user.name}")
-        
-        # Give Discord time to send the response message
-        await asyncio.sleep(3)
-        
-        print(f"[{timestamp}] Shutting down gracefully...")
-        
-        # Close the bot cleanly
-        await self.bot.close()
-        
-        # Exit with code 1 so startbot.py will restart it
-        import sys
-        sys.exit(1)
         
     @app_commands.command(name="track-controller", description="Continuously track a controller's status in a specific channel.")
     @app_commands.describe(
@@ -806,4 +786,5 @@ class AtcCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AtcCog(bot))
+
 
