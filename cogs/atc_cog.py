@@ -58,8 +58,8 @@ class AtcCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db_manager = DatabaseManager()
-        self.vatsim_checker.start()
         self.previously_notified = set()
+        self.vatsim_checker.start()
         self.update_controller_trackers.start()
 
     def cog_unload(self):
@@ -95,12 +95,19 @@ class AtcCog(commands.Cog):
         current_controllers = {controller['callsign'] for controller in data.get('controllers', [])}
         all_rules = await self.db_manager.get_all_notifications()
         
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] Processing ATC notifications: {len(all_rules)} rule(s), {len(current_controllers)} controller(s) online")
+        print(f"[{timestamp}] Currently tracking {len(self.previously_notified)} previously notified controller(s)")
+        
         pending_notifications = defaultdict(list)
 
         banned_frequencies = ["199.998", "199.997", "199.999"]
         
         for rule in all_rules:
             rule_id, guild_id, airport_icao, channel_id, role_id, delete_pref = rule
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+            print(f"[{timestamp}] === Checking rule {rule_id} for {airport_icao} ===")
+            
             for controller in data.get('controllers', []):
                 callsign = controller['callsign']
                 
@@ -111,25 +118,64 @@ class AtcCog(commands.Cog):
                 callsign_base = callsign.split('_')[0]
 
                 # Create a set of valid identifiers to check against
+                # Global ICAO matching: check full code, last 3 chars, and last 2 chars
                 identifiers_to_check = {db_identifier}
-                # If user entered a 4-letter ICAO, also check for its 3-letter version
-                if len(db_identifier) == 4:
+                
+                # Add last 3 characters (e.g., YSSY -> SSY, KORD -> ORD, YMML -> MML)
+                if len(db_identifier) >= 3:
+                    identifiers_to_check.add(db_identifier[-3:])
+                
+                # Add last 2 characters (e.g., YSSY -> SY, YMML -> ML, EGLL -> LL)
+                if len(db_identifier) >= 2:
+                    identifiers_to_check.add(db_identifier[-2:])
+                
+                # For 4-letter codes starting with K (US convention), also add 3-letter version
+                # e.g., KORD -> ORD (already covered by last 3 chars above)
+                if len(db_identifier) == 4 and db_identifier.startswith('K'):
                     identifiers_to_check.add(db_identifier[1:])
 
                 match_found = callsign_base in identifiers_to_check
                 
-                if match_found and (rule_id, callsign) not in self.previously_notified:
-                    key = (rule_id, guild_id, channel_id, role_id, airport_icao, delete_pref)
-                    pending_notifications[key].append(controller)
+                # Detailed logging for debugging matches
+                timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                if callsign_base == db_identifier[:2] or callsign_base == db_identifier[-2:]:
+                    # Potential match that's failing due to logic
+                    print(f"[{timestamp}] 🔍 Comparing {callsign}: base='{callsign_base}' vs identifiers={identifiers_to_check} -> {'MATCH' if match_found else 'NO MATCH (but looks related!)'}")
+                
+                if match_found:
+                    # Use logon_time to track unique sessions
+                    logon_time = controller.get('logon_time', '')
+                    session_key = (rule_id, callsign, logon_time)
+                    
+                    if session_key in self.previously_notified:
+                        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                        print(f"[{timestamp}] Skipping {callsign} for rule {rule_id} ({airport_icao}): Already notified this session (logged on at {logon_time})")
+                    else:
+                        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                        print(f"[{timestamp}] ✓ NEW MATCH: {callsign} matches rule {rule_id} ({airport_icao}) - New session logged on at {logon_time}")
+                        key = (rule_id, guild_id, channel_id, role_id, airport_icao, delete_pref)
+                        pending_notifications[key].append(controller)
+        
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        if pending_notifications:
+            print(f"[{timestamp}] Preparing to send {len(pending_notifications)} notification(s)")
+        else:
+            print(f"[{timestamp}] No new notifications to send")
         
         for (rule_id, guild_id, channel_id, role_id, airport_icao, delete_pref), controllers_list in pending_notifications.items():
             guild = self.bot.get_guild(guild_id)
             channel = self.bot.get_channel(channel_id)
             role = guild.get_role(role_id) if guild and role_id else None
-            if not all([guild, channel]): 
+            
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+            if not guild:
+                print(f"[{timestamp}] ⚠️ Cannot send notification for rule {rule_id}: Guild {guild_id} not found")
+                continue
+            if not channel:
+                print(f"[{timestamp}] ⚠️ Cannot send notification for rule {rule_id}: Channel {channel_id} not found")
                 continue
 
-            print(f"!!! MATCH FOUND: {[c['callsign'] for c in controllers_list]} for rule ID {rule_id}. Sending combined notification...")
+            print(f"[{timestamp}] 📤 Sending notification: {[c['callsign'] for c in controllers_list]} for rule {rule_id} to #{channel.name} in {guild.name}")
 
             title = f"📡 ATC Online at {airport_icao}"
             description = ""
@@ -192,13 +238,25 @@ class AtcCog(commands.Cog):
             try:
                 content_to_send = role.mention if role else None
                 sent_message = await channel.send(content=content_to_send, embed=embed)
+                
+                timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                print(f"[{timestamp}] ✅ Notification sent successfully (Message ID: {sent_message.id})")
 
                 for controller in controllers_list:
-                    self.previously_notified.add((rule_id, controller['callsign']))
+                    logon_time = controller.get('logon_time', '')
+                    session_key = (rule_id, controller['callsign'], logon_time)
+                    self.previously_notified.add(session_key)
+                    
                     if delete_pref:
                         await self.db_manager.add_active_notification(rule_id, sent_message.id, channel.id, controller['callsign'])
+                        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                        print(f"[{timestamp}] 💾 Added {controller['callsign']} (session: {logon_time}) to active_notifications (delete_on_offline enabled)")
+                    else:
+                        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                        print(f"[{timestamp}] 📝 Added {controller['callsign']} (session: {logon_time}) to in-memory cache")
             except discord.Forbidden:
-                print(f"Error: Missing permissions to send message in G:{guild.id} C:{channel.id}")
+                timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                print(f"[{timestamp}] ❌ PERMISSION ERROR: Cannot send to #{channel.name} in {guild.name} (G:{guild.id} C:{channel.id})")
                 try:
                     owner = guild.owner
                     if not owner: # Fallback if owner is not cached
@@ -222,7 +280,10 @@ class AtcCog(commands.Cog):
             except Exception as e:
                 print(f"An error occurred sending notification: {e}")
 
-        offline_callsigns = {notified[1] for notified in self.previously_notified} - current_controllers
+        # Clean up offline controllers - only match by callsign (ignore logon_time for cleanup)
+        current_callsigns = {controller['callsign'] for controller in data.get('controllers', [])}
+        offline_callsigns = {notified[1] for notified in self.previously_notified} - current_callsigns
+        
         for callsign in offline_callsigns:
             active_notif_record = await self.db_manager.get_active_notification_by_callsign(callsign)
             
@@ -241,7 +302,8 @@ class AtcCog(commands.Cog):
                 
                 await self.db_manager.remove_active_notification_by_callsign(callsign)
 
-        self.previously_notified = {notified for notified in self.previously_notified if notified[1] in current_controllers}
+        # Remove offline sessions from cache (check callsign in position 1 of tuple)
+        self.previously_notified = {notified for notified in self.previously_notified if notified[1] in current_callsigns}
 
     @vatsim_checker.before_loop
     async def before_vatsim_checker(self):
@@ -350,16 +412,57 @@ class AtcCog(commands.Cog):
     async def config_role(self, interaction: discord.Interaction, role: discord.Role):
         await self.db_manager.set_management_role(interaction.guild_id, role.id)
         await interaction.response.send_message(f"✅ The {role.mention} role can now manage ATC notifications.", ephemeral=True)
+    
+    @app_commands.command(name="force-update", description="Force an immediate update of all trackers and notifications (Admin only).")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def force_update(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] 🔄 MANUAL UPDATE TRIGGERED by {interaction.user.name}")
+        
+        # Trigger the loops manually
+        await interaction.followup.send("⏳ Running ATC notification check...", ephemeral=True)
+        await self.vatsim_checker()
+        
+        await interaction.followup.send("⏳ Running controller tracker update...", ephemeral=True)
+        await self.update_controller_trackers()
+        
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] ✅ Manual update completed")
+        
+        await interaction.followup.send("✅ All updates completed! Check the console for detailed logs.", ephemeral=True)
+    
+    @app_commands.command(name="restart-bot", description="Restart the bot (Admin only).")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def restart_bot(self, interaction: discord.Interaction):
+        await interaction.response.send_message("🔄 Restarting in 3 seconds...", ephemeral=True)
+        
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] 🔄 RESTART TRIGGERED by {interaction.user.name}")
+        
+        # Give Discord time to send the response message
+        await asyncio.sleep(3)
+        
+        print(f"[{timestamp}] Shutting down gracefully...")
+        
+        # Close the bot cleanly
+        await self.bot.close()
+        
+        # Exit with code 1 so startbot.py will restart it
+        import sys
+        sys.exit(1)
         
     @app_commands.command(name="track-controller", description="Continuously track a controller's status in a specific channel.")
     @app_commands.describe(
         cid="The VATSIM CID of the controller to track.", 
         channel="The channel to post the tracking embed in.",
         role="The role to ping when the controller comes online (Optional).",
-        delete_on_offline="Set to True to delete the message when the controller logs off."
+        delete_on_offline="Set to True to delete the message when the controller logs off.",
+        nickname="A friendly name for this controller (Optional)."
     )
     @app_commands.check(check_manager_permissions)
-    async def track_controller(self, interaction: discord.Interaction, cid: str, channel: discord.TextChannel, delete_on_offline: bool = False, role: Optional[discord.Role] = None):
+    async def track_controller(self, interaction: discord.Interaction, cid: str, channel: discord.TextChannel, delete_on_offline: bool = False, role: Optional[discord.Role] = None, nickname: Optional[str] = None):
         await interaction.response.defer(ephemeral=True)
 
         existing = await self.db_manager.get_controller_tracker_by_cid(interaction.guild_id, cid)
@@ -367,7 +470,11 @@ class AtcCog(commands.Cog):
             await interaction.followup.send(f"A controller tracker for CID `{cid}` already exists.", ephemeral=True)
             return
 
-        embed = discord.Embed(title=f"Initializing Controller Tracker for CID: {cid}", description="Fetching initial data...", color=discord.Color.light_grey())
+        title = f"Initializing Controller Tracker for CID: {cid}"
+        if nickname:
+            title = f"Initializing Controller Tracker: {nickname} (CID: {cid})"
+            
+        embed = discord.Embed(title=title, description="Fetching initial data...", color=discord.Color.light_grey())
         try:
             message = await channel.send(embed=embed)
         except discord.Forbidden:
@@ -375,9 +482,11 @@ class AtcCog(commands.Cog):
             return
         
         role_id = role.id if role else None
-        await self.db_manager.add_controller_tracker(interaction.guild_id, channel.id, message.id, cid, delete_on_offline, role_id)
+        await self.db_manager.add_controller_tracker(interaction.guild_id, channel.id, message.id, cid, delete_on_offline, role_id, nickname)
         
         response_text = f"✅ Controller tracker for CID `{cid}` created in {channel.mention}."
+        if nickname:
+            response_text = f"✅ Controller tracker for **{nickname}** (CID `{cid}`) created in {channel.mention}."
         if role:
             response_text += f"\n*I will ping {role.mention} when the controller comes online.*"
         if delete_on_offline:
@@ -394,6 +503,9 @@ class AtcCog(commands.Cog):
             return  # The check function sends the "no permission" message
 
         await interaction.response.defer(ephemeral=True)
+
+        # Strip 'CID: ' prefix if present (handles autocomplete format or user input)
+        cid = cid.replace('CID:', '').replace('CID ', '').strip()
 
         tracker = await self.db_manager.get_controller_tracker_by_cid(interaction.guild_id, cid)
         if not tracker:
@@ -412,6 +524,80 @@ class AtcCog(commands.Cog):
         await self.db_manager.remove_controller_tracker(tracker_id)
         await interaction.followup.send(f"✅ The controller tracker for CID `{cid}` has been removed.", ephemeral=True)
 
+    @app_commands.command(name="edit-controller-tracker", description="Edit settings for an existing controller tracker.")
+    @app_commands.describe(
+        cid="The VATSIM CID of the controller tracker to edit.",
+        channel="Change the channel (Optional).",
+        role="Change the role to ping (Optional).",
+        delete_on_offline="Change delete-on-offline behavior (Optional).",
+        nickname="Change the nickname (Optional)."
+    )
+    @app_commands.check(check_manager_permissions)
+    async def edit_controller_tracker(self, interaction: discord.Interaction, cid: str,
+                                      channel: Optional[discord.TextChannel] = None,
+                                      role: Optional[discord.Role] = None,
+                                      delete_on_offline: Optional[bool] = None,
+                                      nickname: Optional[str] = None):
+        await interaction.response.defer(ephemeral=True)
+
+        # Strip 'CID: ' prefix if present (handles legacy data or user typos)
+        cid = cid.replace('CID:', '').replace('CID ', '').strip()
+
+        tracker = await self.db_manager.get_controller_tracker_by_cid(interaction.guild_id, cid)
+        if not tracker:
+            await interaction.followup.send(f"No controller tracker found for CID `{cid}`.", ephemeral=True)
+            return
+
+        tracker_id = tracker[0]
+
+        # Build update parameters
+        updates = []
+        if channel is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, channel_id=channel.id)
+            updates.append(f"Channel: {channel.mention}")
+        if role is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, role_id=role.id)
+            updates.append(f"Role: {role.mention}")
+        if delete_on_offline is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, delete_on_offline=delete_on_offline)
+            updates.append(f"Delete on offline: {delete_on_offline}")
+        if nickname is not None:
+            await self.db_manager.update_controller_tracker(tracker_id, nickname=nickname)
+            updates.append(f"Nickname: {nickname}")
+
+        if not updates:
+            await interaction.followup.send("No changes specified. Please provide at least one parameter to update.", ephemeral=True)
+            return
+
+        updates_text = "\n• ".join(updates)
+        await interaction.followup.send(f"✅ Updated controller tracker for CID `{cid}`:\n• {updates_text}", ephemeral=True)
+
+    @edit_controller_tracker.autocomplete('cid')
+    async def edit_controller_tracker_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        trackers = await self.db_manager.get_all_controller_trackers()
+        guild_trackers = [t for t in trackers if t[1] == interaction.guild_id]
+
+        choices = []
+        for tracker in guild_trackers:
+            # Handle both old and new format
+            if len(tracker) == 9:
+                cid = tracker[4]
+                nickname = tracker[8]
+            else:
+                cid = tracker[4]
+                nickname = None
+            
+            name = f"CID: {cid}"
+            if nickname:
+                name = f"{nickname} (CID: {cid})"
+            
+            choices.append(app_commands.Choice(name=name, value=str(cid)))
+
+        if current:
+            return [choice for choice in choices if current.lower() in choice.name.lower() or current.lower() in choice.value.lower()]
+        
+        return choices[:25]
+
     @untrack_controller.autocomplete('cid')
     async def untrack_controller_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         trackers = await self.db_manager.get_all_controller_trackers()
@@ -428,26 +614,85 @@ class AtcCog(commands.Cog):
         
         return choices[:25] # limit of 25... Discord L
 
+    @app_commands.command(name="list-controller-trackers", description="Lists all active controller trackers for this server.")
+    async def list_controller_trackers(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        all_trackers = await self.db_manager.get_all_controller_trackers()
+        guild_trackers = [t for t in all_trackers if t[1] == interaction.guild_id]
+        
+        if not guild_trackers:
+            await interaction.followup.send("There are no active controller trackers for this server.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title=f"Active Controller Trackers for {interaction.guild.name}",
+            color=discord.Color.og_blurple()
+        )
+        
+        description = ""
+        for tracker in guild_trackers:
+            # Handle both old (8 columns) and new (9 columns) format
+            if len(tracker) == 9:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent, nickname = tracker
+            else:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker
+                nickname = None
+            
+            channel = self.bot.get_channel(channel_id)
+            channel_text = channel.mention if channel else f"Unknown Channel (ID: {channel_id})"
+            
+            role = interaction.guild.get_role(role_id) if role_id else None
+            role_text = f", pings {role.mention}" if role else ""
+            
+            delete_text = " 🗑️" if delete_on_offline else ""
+            
+            label = f"**CID `{cid}`**"
+            if nickname:
+                label = f"**{nickname}** (CID `{cid}`)"
+            
+            description += f"• {label} → {channel_text}{role_text}{delete_text}\n"
+        
+        embed.description = description
+        embed.set_footer(text="🗑️ = Message deleted when offline")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     # --- BACKGROUND LOOP FOR CONTROLLER TRACKING ---
 
     @tasks.loop(minutes=4)
     async def update_controller_trackers(self):
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] Running controller tracker update loop...")
         all_trackers = await self.db_manager.get_all_controller_trackers()
         if not all_trackers:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+            print(f"[{timestamp}] No controller trackers found.")
             return
 
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] Found {len(all_trackers)} controller tracker(s) to update.")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(VATSIM_DATA_URL) as response:
-                    if response.status != 200: return
+                    if response.status != 200:
+                        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+                        print(f"[{timestamp}] Error fetching VATSIM data for controller trackers: Status {response.status}")
+                        return
                     vatsim_data = await response.json()
-        except aiohttp.ClientError:
+        except aiohttp.ClientError as e:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+            print(f"[{timestamp}] AIOHTTP Error fetching VATSIM data for controller trackers: {e}")
             return
             
         controllers_by_cid = {str(c['cid']): c for c in vatsim_data.get('controllers', [])}
 
         for tracker_data in all_trackers:
-            tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker_data
+            # Handle both old (8 columns) and new (9 columns) format for backward compatibility
+            if len(tracker_data) == 9:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent, nickname = tracker_data
+            else:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker_data
+                nickname = None
             
             channel = self.bot.get_channel(channel_id)
             if not channel:
@@ -457,7 +702,7 @@ class AtcCog(commands.Cog):
             controller_data = controllers_by_cid.get(cid)
 
             if controller_data: # Controller is ONLINE
-                embed = create_controller_embed(controller_data)
+                embed = create_controller_embed(controller_data, nickname)
                 content_to_send = None
 
                 if role_id and not ping_sent:
@@ -512,7 +757,11 @@ class AtcCog(commands.Cog):
 
     @update_controller_trackers.before_loop
     async def before_update_controller_trackers(self):
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] Waiting for bot to be ready before starting controller tracker loop...")
         await self.bot.wait_until_ready()
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H:%M:%SZ")
+        print(f"[{timestamp}] Bot ready. Controller tracker loop will now start.")
 
     # --- HELPER METHODS FOR CONTROLLER TRACKING ---
     
@@ -532,14 +781,24 @@ class AtcCog(commands.Cog):
         if not channel: return
         try:
             message = await channel.fetch_message(message_id)
+            # Get nickname from guild
+            tracker = await self.db_manager.get_controller_tracker_by_cid(message.guild.id, cid)
+            nickname = tracker[8] if tracker and len(tracker) > 8 else None
+            
             if controller_data:
-                embed = create_controller_embed(controller_data)
+                embed = create_controller_embed(controller_data, nickname)
                 # We don't handle pings here since this is a manual, one-off update
                 await message.edit(content=None, embed=embed)
             else:
+                title = "📡 Controller Offline"
+                description = f"The controller with CID `{cid}` is not currently connected to VATSIM."
+                if nickname:
+                    title = f"📡 {nickname} Offline"
+                    description = f"**{nickname}** (CID `{cid}`) is not currently connected to VATSIM."
+                    
                 embed = discord.Embed(
-                    title="📡 Controller Offline",
-                    description=f"The controller with CID `{cid}` is not currently connected to VATSIM.",
+                    title=title,
+                    description=description,
                     color=discord.Color.red(),
                     timestamp=datetime.datetime.now(datetime.timezone.utc)
                 )
@@ -550,3 +809,4 @@ class AtcCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AtcCog(bot))
+

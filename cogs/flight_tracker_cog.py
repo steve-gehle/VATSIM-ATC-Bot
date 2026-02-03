@@ -25,9 +25,10 @@ class FlightTrackerCog(commands.Cog):
         cid="The VATSIM CID of the pilot to track.", 
         channel="The channel to post the tracking embed in.",
         role="The role to ping when the pilot comes online (Optional).",
-        delete_on_offline="Set to True to delete the message when the pilot logs off."
+        delete_on_offline="Set to True to delete the message when the pilot logs off.",
+        nickname="A friendly name for this pilot (Optional)."
     )
-    async def track_pilot(self, interaction: discord.Interaction, cid: str, channel: discord.TextChannel, delete_on_offline: bool = False, role: Optional[discord.Role] = None):
+    async def track_pilot(self, interaction: discord.Interaction, cid: str, channel: discord.TextChannel, delete_on_offline: bool = False, role: Optional[discord.Role] = None, nickname: Optional[str] = None):
         await interaction.response.defer(ephemeral=True)
 
         # Check if this pilot is already being tracked in this guild
@@ -37,8 +38,12 @@ class FlightTrackerCog(commands.Cog):
             return
 
         # Create a placeholder embed
+        title = f"Initializing Flight Tracker for CID: {cid}"
+        if nickname:
+            title = f"Initializing Flight Tracker: {nickname} (CID: {cid})"
+        
         embed = discord.Embed(
-            title=f"Initializing Flight Tracker for CID: {cid}",
+            title=title,
             description="Fetching initial data...",
             color=discord.Color.light_grey()
         )
@@ -54,9 +59,11 @@ class FlightTrackerCog(commands.Cog):
 
         # Add to database
         role_id = role.id if role else None
-        await self.db_manager.add_flight_tracker(interaction.guild_id, channel.id, message.id, cid, delete_on_offline, role_id)
+        await self.db_manager.add_flight_tracker(interaction.guild_id, channel.id, message.id, cid, delete_on_offline, role_id, nickname)
         
         response_text = f"✅ Flight tracker for CID `{cid}` has been created in {channel.mention}."
+        if nickname:
+            response_text = f"✅ Flight tracker for **{nickname}** (CID `{cid}`) has been created in {channel.mention}."
         if role:
             response_text += f"\n*I will ping {role.mention} when the pilot comes online.*"
         if delete_on_offline:
@@ -88,7 +95,12 @@ class FlightTrackerCog(commands.Cog):
         pilots_by_cid = {str(p['cid']): p for p in vatsim_data.get('pilots', [])}
 
         for tracker_data in all_trackers:
-            tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker_data
+            # Handle both old (8 columns) and new (9 columns) format for backward compatibility
+            if len(tracker_data) == 9:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent, nickname = tracker_data
+            else:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker_data
+                nickname = None
             
             channel = self.bot.get_channel(channel_id)
             if not channel:
@@ -99,7 +111,7 @@ class FlightTrackerCog(commands.Cog):
             pilot_data = pilots_by_cid.get(cid)
             
             if pilot_data: # Pilot is ONLINE
-                embed = create_pilot_embed(pilot_data)
+                embed = create_pilot_embed(pilot_data, nickname)
                 content_to_send = None
 
                 # Check if we need to send a ping for the first time
@@ -143,7 +155,7 @@ class FlightTrackerCog(commands.Cog):
                             await message.delete()
                             await self.db_manager.clear_flight_tracker_message(tracker_id)
                         else:
-                            embed = self.create_offline_embed(cid)
+                            embed = self.create_offline_embed(cid, nickname)
                             # Edit with no content to remove any lingering pings
                             await message.edit(content=None, embed=embed)
                             await asyncio.sleep(2)
@@ -175,16 +187,30 @@ class FlightTrackerCog(commands.Cog):
             return
 
         if pilot_data:
-            embed = create_pilot_embed(pilot_data)
+            # Get nickname from database
+            tracker = await self.db_manager.get_flight_tracker_by_cid(message.guild.id, cid)
+            nickname = tracker[8] if tracker and len(tracker) > 8 else None
+            embed = create_pilot_embed(pilot_data, nickname)
         else:
-            embed = self.create_offline_embed(cid)
+            # Get nickname from database
+            tracker = await self.db_manager.get_flight_tracker_by_cid(message.guild.id, cid)
+            nickname = tracker[8] if tracker and len(tracker) > 8 else None
+            embed = self.create_offline_embed(cid, nickname)
         
         await message.edit(embed=embed)
 
-    def create_offline_embed(self, cid):
+    def create_offline_embed(self, cid, nickname=None):
+        title = f"✈️ Pilot Offline"
+        if nickname:
+            title = f"✈️ {nickname} Offline"
+        
+        description = f"The pilot with CID `{cid}` is not currently connected to the VATSIM network."
+        if nickname:
+            description = f"**{nickname}** (CID `{cid}`) is not currently connected to the VATSIM network."
+            
         embed = discord.Embed(
-            title=f"✈️ Pilot Offline",
-            description=f"The pilot with CID `{cid}` is not currently connected to the VATSIM network.",
+            title=title,
+            description=description,
             color=discord.Color.red(),
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
@@ -195,6 +221,9 @@ class FlightTrackerCog(commands.Cog):
     @app_commands.describe(cid="The VATSIM CID of the pilot to untrack.")
     async def untrack_pilot(self, interaction: discord.Interaction, cid: str):
         await interaction.response.defer(ephemeral=True)
+
+        # Strip 'CID: ' prefix if present (handles autocomplete format or user input)
+        cid = cid.replace('CID:', '').replace('CID ', '').strip()
 
         tracker = await self.db_manager.get_flight_tracker_by_cid(interaction.guild_id, cid)
         if not tracker:
@@ -220,6 +249,79 @@ class FlightTrackerCog(commands.Cog):
         await self.db_manager.remove_flight_tracker(tracker_id)
         await interaction.followup.send(f"✅ The flight tracker for CID `{cid}` has been removed.", ephemeral=True)
 
+    @app_commands.command(name="edit-pilot-tracker", description="Edit settings for an existing pilot tracker.")
+    @app_commands.describe(
+        cid="The VATSIM CID of the pilot tracker to edit.",
+        channel="Change the channel (Optional).",
+        role="Change the role to ping (Optional).",
+        delete_on_offline="Change delete-on-offline behavior (Optional).",
+        nickname="Change the nickname (Optional)."
+    )
+    async def edit_pilot_tracker(self, interaction: discord.Interaction, cid: str, 
+                                 channel: Optional[discord.TextChannel] = None,
+                                 role: Optional[discord.Role] = None,
+                                 delete_on_offline: Optional[bool] = None,
+                                 nickname: Optional[str] = None):
+        await interaction.response.defer(ephemeral=True)
+
+        # Strip 'CID: ' prefix if present (handles legacy data or user typos)
+        cid = cid.replace('CID:', '').replace('CID ', '').strip()
+
+        tracker = await self.db_manager.get_flight_tracker_by_cid(interaction.guild_id, cid)
+        if not tracker:
+            await interaction.followup.send(f"No flight tracker found for CID `{cid}` in this server.", ephemeral=True)
+            return
+
+        tracker_id = tracker[0]
+
+        # Build update parameters
+        updates = []
+        if channel is not None:
+            await self.db_manager.update_flight_tracker(tracker_id, channel_id=channel.id)
+            updates.append(f"Channel: {channel.mention}")
+        if role is not None:
+            await self.db_manager.update_flight_tracker(tracker_id, role_id=role.id)
+            updates.append(f"Role: {role.mention}")
+        if delete_on_offline is not None:
+            await self.db_manager.update_flight_tracker(tracker_id, delete_on_offline=delete_on_offline)
+            updates.append(f"Delete on offline: {delete_on_offline}")
+        if nickname is not None:
+            await self.db_manager.update_flight_tracker(tracker_id, nickname=nickname)
+            updates.append(f"Nickname: {nickname}")
+
+        if not updates:
+            await interaction.followup.send("No changes specified. Please provide at least one parameter to update.", ephemeral=True)
+            return
+
+        updates_text = "\n• ".join(updates)
+        await interaction.followup.send(f"✅ Updated pilot tracker for CID `{cid}`:\n• {updates_text}", ephemeral=True)
+
+    @edit_pilot_tracker.autocomplete('cid')
+    async def edit_pilot_tracker_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        trackers = await self.db_manager.get_all_flight_trackers()
+        guild_trackers = [t for t in trackers if t[1] == interaction.guild_id]
+
+        choices = []
+        for tracker in guild_trackers:
+            # Handle both old and new format
+            if len(tracker) == 9:
+                cid = tracker[4]
+                nickname = tracker[8]
+            else:
+                cid = tracker[4]
+                nickname = None
+            
+            name = f"CID: {cid}"
+            if nickname:
+                name = f"{nickname} (CID: {cid})"
+            
+            choices.append(app_commands.Choice(name=name, value=str(cid)))
+
+        if current:
+            return [choice for choice in choices if current.lower() in choice.name.lower() or current.lower() in choice.value.lower()]
+        
+        return choices[:25]
+
     @untrack_pilot.autocomplete('cid')
     async def untrack_pilot_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         trackers = await self.db_manager.get_all_flight_trackers()
@@ -234,6 +336,49 @@ class FlightTrackerCog(commands.Cog):
             return [choice for choice in choices if current.lower() in choice.value.lower()]
         
         return choices[:25]
+
+    @app_commands.command(name="list-pilot-trackers", description="Lists all active pilot trackers for this server.")
+    async def list_pilot_trackers(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        all_trackers = await self.db_manager.get_all_flight_trackers()
+        guild_trackers = [t for t in all_trackers if t[1] == interaction.guild_id]
+        
+        if not guild_trackers:
+            await interaction.followup.send("There are no active pilot trackers for this server.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title=f"Active Pilot Trackers for {interaction.guild.name}",
+            color=discord.Color.og_blurple()
+        )
+        
+        description = ""
+        for tracker in guild_trackers:
+            # Handle both old (8 columns) and new (9 columns) format
+            if len(tracker) == 9:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent, nickname = tracker
+            else:
+                tracker_id, guild_id, channel_id, message_id, cid, delete_on_offline, role_id, ping_sent = tracker
+                nickname = None
+            
+            channel = self.bot.get_channel(channel_id)
+            channel_text = channel.mention if channel else f"Unknown Channel (ID: {channel_id})"
+            
+            role = interaction.guild.get_role(role_id) if role_id else None
+            role_text = f", pings {role.mention}" if role else ""
+            
+            delete_text = " 🗑️" if delete_on_offline else ""
+            
+            label = f"**CID `{cid}`**"
+            if nickname:
+                label = f"**{nickname}** (CID `{cid}`)"
+            
+            description += f"• {label} → {channel_text}{role_text}{delete_text}\n"
+        
+        embed.description = description
+        embed.set_footer(text="🗑️ = Message deleted when offline")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
