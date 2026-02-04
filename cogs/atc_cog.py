@@ -16,13 +16,15 @@ VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
 
 # --- Permission Check from db ---
 async def check_manager_permissions(interaction: discord.Interaction) -> bool:
-    if interaction.user.guild_permissions.administrator:
+    # Get the full member object from the guild to ensure accurate permission checking
+    member = interaction.guild.get_member(interaction.user.id)
+    if member and member.guild_permissions.administrator:
         return True
     
     db_manager = DatabaseManager()
     manager_role_id = await db_manager.get_management_role(interaction.guild_id)
     
-    if manager_role_id and any(role.id == manager_role_id for role in interaction.user.roles):
+    if manager_role_id and member and any(role.id == manager_role_id for role in member.roles):
         return True
         
     await interaction.response.send_message("You need to be an Administrator or have the manager role to use this command.", ephemeral=True)
